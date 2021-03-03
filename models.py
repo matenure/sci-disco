@@ -53,3 +53,14 @@ class LinkPredictor(torch.nn.Module):
             x = F.dropout(x, p=self.dropout, training=self.training)
         x = self.lins[-1](x)
         return torch.sigmoid(x)
+
+class GCNInference(torch.nn.Module):
+    def __init__(self, weights):
+        super(GCNInference, self).__init__()
+        self.weights = weights
+    
+    def forward(self, x, adj):
+        for i, (weight, bias) in enumerate(self.weights):
+            x = adj @ x @ weight + bias
+            x = np.clip(x, 0, None) if i < len(self.weights) - 1 else x
+        return x
