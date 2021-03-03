@@ -3,6 +3,8 @@ import argparse
 from models import GCN, LinkPredictor
 from data_utils import MyOwnDataset
 from train_utils import train
+from logger_utils import logger
+from eval_utils import evaluator
 
 import torch
 from torch_geometric.data import ClusterData, ClusterLoader
@@ -20,7 +22,7 @@ def main():
     parser.add_argument('--batch_size', type=int, default=64)
     parser.add_argument('--lr', type=float, default=0.001)
     parser.add_argument('--epochs', type=int, default=10)
-    parser.add_argument('--eval_steps', type=int, default=10)
+    parser.add_argument('--eval_steps', type=int, default=5)
     parser.add_argument('--runs', type=int, default=2)
     args = parser.parse_args()
     print(args)
@@ -52,8 +54,8 @@ def main():
     # create model
     model = GCN(data.x.size(-1), args.hidden_channels, args.hidden_channels,args.num_layers, args.dropout).to(device)
     predictor = LinkPredictor(args.hidden_channels, args.hidden_channels, 1,args.num_layers, args.dropout).to(device)
-    # evaluator = Evaluator(name='ogbl-citation2')
-    # logger = Logger(args.runs, args)
+    evaluator = Evaluator()
+    logger = Logger(args.runs, args)
     print (model)
     print (predictor)
 
@@ -65,7 +67,6 @@ def main():
         for epoch in range(1, 1 + args.epochs):
             loss = train(model, predictor, loader, optimizer, device)
             print(f'Run: {run + 1:02d}, Epoch: {epoch:02d}, Loss: {loss:.4f}')
-            '''
             if epoch > 49 and epoch % args.eval_steps == 0:
                 result = test(model, predictor, data, split_edge, evaluator,batch_size=64 * 1024, device=device)
                 logger.add_result(run, result)
@@ -77,7 +78,6 @@ def main():
                       f'Train: {train_mrr:.4f}, '
                       f'Valid: {valid_mrr:.4f}, '
                       f'Test: {test_mrr:.4f}')
-            '''
 
         print('ClusterGCN')
     # logger.print_statistics(run)
