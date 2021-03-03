@@ -1,6 +1,6 @@
 # Scientific Discovery IBM2
 
-This code is directly revised from ogbl-citation2 (https://github.com/snap-stanford/ogb/tree/master/examples/linkproppred/citation2). The code contains self-implement dataset, model and training process. 
+This code is directly revised from ogbl-citation2 (https://github.com/snap-stanford/ogb/tree/master/examples/linkproppred/citation2). 
 
 ## Dataset 
 
