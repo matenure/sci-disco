@@ -8,7 +8,7 @@ The ogbl-citation2 dataset is a directed graph, representing the citation networ
 
 The ogbl-citation2 dataset can be downloaded from https://snap.stanford.edu/ogb/data/linkproppred/citation-v2.zip. Create a directory called "dataset". Unzip the file and place it under the /root/dataset/.
 ```
-unzip citation-v2 -d dataset/
+> unzip citation-v2 -d dataset/
 ```
 
 This dataset has edge, word2vec feature and year information.
@@ -16,7 +16,7 @@ This dataset has edge, word2vec feature and year information.
 Data(edge_index=[2, 30387995], node_year=[2927963, 1], x=[2927963, 128])
 ```
 
-In citation-v2/raw, edge contains the citation relation between two papers (node). node_year contains the year of paper published and node-feat contains 128 dimension feature for each paper. 
+In citation-v2/raw, edge.csv contains the citation relation between two papers (node). node_year.csv contains the year of paper published and node-feat.csv contains 128 dimension word2vec for each paper. 
 
 ```
 # edge.csv example
@@ -38,7 +38,7 @@ In citation-v2/raw, edge contains the citation relation between two papers (node
 -0.101635,-0.199759,-0.071075,-0.200401,-0.024454,-0.059139,-0.207714,-0.276148,-0.122317,0.186963,-0.125493,-0.469269,0.075597,0.178241,-0.280112,-0.009582,0.14324,0.172974,0.214746,-0.454254,-0.431507,0.111782,-0.40951,0.015444,0.12723,0.511373,0.010537,-0.393149,-0.291198,0.013478,-0.227882,-0.33149,0.110768,0.155638,0.187104,-0.45447,-0.069795,0.012327,0.177607,0.226875,0.083095,0.199383,0.301913,0.086732,0.014111,0.299076,0.405646,0.087978,0.394384,0.337433,0.45761,0.316297,-0.159394,-0.309778,-0.025395,0.094475,-0.070276,0.021594,0.143423,-0.208096,0.349111,-0.200469,-0.116833,0.103009,0.256844,0.013612,-0.178708,-0.005631,0.464597,-0.167193,-0.167153,-0.001948,0.372564,-0.524499,-0.085119,-0.309263,-0.030215,0.020988,-0.134438,0.183071,-0.036979,0.051214,0.599335,-0.504123,-0.052932,0.224722,-0.122018,0.27477,0.928362,0.107967,0.434697,-0.214554,0.135348,-0.291281,-0.087283,0.25202,-0.224141,-0.016279,0.099986,-0.12937,-0.399735,0.904225,-0.157795,0.027236,0.046097,-0.01698,-0.021966,0.097468,-0.214259,-0.043609,-0.536244,-0.126465,0.032069,0.216483,0.223119,0.377865,0.386312,0.194793,0.212084,-0.306509,-0.080057,-0.357702,0.104477,-0.159406,-0.106419,-0.109911,0.113,-0.325842
 ```
 
-In citation-v2/split/time/, it contains the link info split by time. All three files (train, valid and test) contain the source and target node information. 
+In citation-v2/split/time/, it contains the link info split by time. All three files (train, valid and test) contain the source and target node information. Take the train.pt as example, it contains the citation relation between two papers before the time. 
 ```
 # train.pt example
 > train = replace_numpy_with_torchtensor(torch.load('train.pt'))
@@ -70,7 +70,7 @@ LinkPredictor(
 
 ## Train
 
-Run the train.py to start processed the data and start training
+Run the train.py to start processed the data and start training. 
 
 ```
 > python train.py
