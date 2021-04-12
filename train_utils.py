@@ -1,10 +1,15 @@
+'''
+Project: CMPSCI696ds IBM2
+Author: Yuchen Zeng
+'''
+
 import torch
 
 def train(model, predictor, loader, optimizer, device):
     model.train()
     
     total_loss = total_examples = 0
-    for data in loader:
+    for i, data in enumerate(loader):
         data = data.to(device)
         optimizer.zero_grad()
         
