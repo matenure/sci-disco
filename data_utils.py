@@ -46,16 +46,38 @@ class MyOwnDataset(InMemoryDataset):
         print('Saving...')
         torch.save((data, slices), self.processed_paths[0])
 
-    def get_edge_split(self, data_dir=None, model_type=None, threshold=None):
-        train_dir = os.path.join(data_dir,model_type,threshold,'train.pt')
-        valid_dir = os.path.join(data_dir,model_type,threshold,'valid.pt')
-        test_dir = os.path.join(data_dir,model_type,threshold,'test.pt')
-        train = replace_numpy_with_torchtensor(torch.load(train_dir))
-        valid = replace_numpy_with_torchtensor(torch.load(valid_dir))
-        test = replace_numpy_with_torchtensor(torch.load(test_dir))
-        return {'train': train, 'valid': valid, 'test': test}    
+
+
+    def get_edge_split(self, data_dir=None):
+        train_pos_dir = os.path.join(data_dir,'co_train.pt')
+        valid_pos_dir = os.path.join(data_dir,'co_valid.pt')
+
+        valid_neg_f1_dir = os.path.join(data_dir,'co_valid_neg_f1.pt')
+        valid_neg_hit_dir = os.path.join(data_dir,'co_valid_neg_hit.pt')
+
+        test_pos_dir = os.path.join(data_dir,'test_pos.pt')
+        test_neg_f1_dir = os.path.join(data_dir,'test_neg_f1.pt')
+        test_neg_hit_dir = os.path.join(data_dir,'test_neg_hit.pt')
+
+        train_pos = replace_numpy_with_torchtensor(torch.load(train_pos_dir))
+        valid_pos = replace_numpy_with_torchtensor(torch.load(valid_pos_dir))
+        valid_neg_f1 = replace_numpy_with_torchtensor(torch.load(valid_neg_f1_dir))
+        valid_neg_hit = replace_numpy_with_torchtensor(torch.load(valid_neg_hit_dir))
+        test_pos = replace_numpy_with_torchtensor(torch.load(test_pos_dir))
+        test_neg_f1 = replace_numpy_with_torchtensor(torch.load(test_neg_f1_dir))
+        test_neg_hit = replace_numpy_with_torchtensor(torch.load(test_neg_hit_dir))
+
+
+        return {'train_pos': train_pos, 'valid_pos': valid_pos, 'valid_neg_f1': valid_neg_f1, 'valid_neg_hit': valid_neg_hit, 'test_pos': test_pos, 'test_neg_f1':test_neg_f1, 'test_neg_hit': test_neg_hit}
+
+def sort_list(data):
+    sorted_data = []
+    for i,d in enumerate(data):
+        d = sorted(d)
+        sorted_data.append(d)
+    return sorted_data
 
 if __name__ == '__main__':
     DS = MyOwnDataset()
-    split_edge = DS.get_edge_split(data_dir='data', model_type='link_pred',threshold='threshold=0.50')
+    split_edge = DS.get_edge_split(data_dir='data')
     print (DS[0])
