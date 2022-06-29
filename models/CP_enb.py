@@ -145,7 +145,7 @@ def save_model(model, name, output_path='../results/'):
     checkpoint_path = os.path.join(output_path, name+'.pt')
     torch.save(checkpoint, checkpoint_path)
 
-def load_model(model, name, output_path='result/'):
+def load_model(model, name, output_path='../results/'):
     checkpoint_path = os.path.join(output_path, name+'.pt')
     if not os.path.exists(checkpoint_path):
         print (f"Model {checkpoint_path} does not exist.")
