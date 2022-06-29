@@ -2,7 +2,7 @@
 Project: IBM Research: Scientific Discovery
 Author: Yuchen Zeng
 Combinatorial Prediction Method:
-CP-enb: use energy based scoring function to combine feature
+CP-pro: use prompt-based learning to combine feature
 '''
 
 import re
@@ -20,11 +20,11 @@ import torch
 from transformers import BertTokenizer
 import torch.nn.functional as F
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader,Dataset
 from transformers import BertModel, AdamW
 from sklearn.metrics import precision_recall_curve
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+os.environ["CUDA_VISIBLE_DEVICES"] = "3"
 
 # Set seed for reproducibility
 def set_seed(seed_value=42):
@@ -51,7 +51,7 @@ def get_data_split(data_dir=None):
     test_neg_hit = torch.load(os.path.join(data_dir,'test_neg_hit.pt'))
     entities = torch.load(os.path.join(data_dir,'entities.pt'))
 
-    return {'entities': entities, 'train_pos': train_pos, 'train_neg': train_neg,
+    return entities, {'train_pos': train_pos, 'train_neg': train_neg,
             'valid_pos': valid_pos, 'valid_neg_f1': valid_neg_f1, 'valid_neg_hit': valid_neg_hit,
             'test_pos': test_pos, 'test_neg_f1':test_neg_f1, 'test_neg_hit': test_neg_hit}
    
@@ -65,18 +65,23 @@ def text_preprocessing(text):
     return text
  
 # Create a function to tokenize a set of texts
-def preprocessing_for_bert(entities):
+# generate inputs and masks for each combinations
+def preprocessing_for_bert(entities, combinations):
     tokenizer = BertTokenizer.from_pretrained('bert-base-uncased', do_lower_case=True)
     # store outputs
     input_ids = []
     attention_masks = []
     # For every sentence...
-    for sent in tqdm(entities):
-        whole_sent = "This paper uses " + str(sent) + "."
+    for comb in tqdm(combinations):
+        whole_sent_list = ["This paper use"]
+        for c in comb:
+            whole_sent_list.append(entities[c])
+        whole_sent = " and ".join(whole_sent_list) + "."
+        
         encoded_sent = tokenizer.encode_plus(
             text=text_preprocessing(whole_sent),    # Preprocess sentence
             add_special_tokens=True,                # Add `[CLS]` and `[SEP]`
-            max_length=16,                          # Max length to truncate/pad
+            max_length=32,                          # Max length to truncate/pad
             pad_to_max_length=True,                 # Pad sentence to max length
             #return_tensors='pt',                   # Return PyTorch tensor
             return_attention_mask=True,             # Return attention mask
@@ -88,52 +93,43 @@ def preprocessing_for_bert(entities):
         attention_masks.append(encoded_sent.get('attention_mask'))
     input_ids = torch.tensor(input_ids)
     attention_masks = torch.tensor(attention_masks)
-    return input_ids, attention_masks
+    return {"input_ids": input_ids, "attention_masks": attention_masks}
 
-def get_concept_embeddings(entities):
-    # get dataloader
-    input_ids, attention_masks = preprocessing_for_bert(entities)
-    return input_ids, attention_masks
+def tokenization(entities, data_split):
+    keys = data_split.keys()
+    tokenized_data = {}
+    for key in keys:
+        tokenized_data[key] = preprocessing_for_bert(entities, data_split[key])
+    return tokenized_data
     
 # Create the Model class
 class Model(nn.Module):
-    def __init__(self, freeze_bert, inputs, masks):
+    def __init__(self, freeze_bert):
         super(Model, self).__init__()
         # all entities tokens
         self.bert = BertModel.from_pretrained('bert-base-uncased')
-        self.inputs = inputs
-        self.masks = masks
-        # scoring parameters
-        self.b = nn.Parameter(torch.normal(0, 0.1, size=(768, 1)))
-        self.W = nn.Parameter(torch.normal(0, 0.1, size=(768, 768)))
-        self.c = nn.Parameter(torch.zeros(1))
-        # nn.init.kaiming_uniform_(self.b, a=math.sqrt(2))
-        # nn.init.kaiming_uniform_(self.W, a=math.sqrt(2))
-        # nn.init.constant_(self.c, 0)
+        # mlps
+        self.mlps = nn.Sequential(
+           nn.Linear(768, 128),
+           nn.ReLU(),
+           nn.Dropout(p=0.5),
+           nn.Linear(128, 1),
+           nn.Sigmoid()
+           )
+
         # Freeze the BERT model
         if freeze_bert:
             for param in self.bert.parameters():
                 param.requires_grad = False
                 
     def scoring(self, x):
-        # x is the combination of concept features
-        # \mean_i (A_i)*b
-        first_term_value = torch.mean(torch.stack([i @ self.b for i in x]))
-        # \mean_ij A_i.T * W_ij * A_j
-        pairwise_comb = torch.combinations(torch.arange(0,len(x),dtype=torch.long).cuda())
-        second_term_value = torch.mean(torch.stack([x[i] @ self.W @ x[j] for i,j in pairwise_comb]))
-        return torch.sigmoid(first_term_value + second_term_value + self.c)
+        h = self.mlps(x)
+        return h
     
-    def forward(self, batch):
-        output = []
-        for comb in batch:
-            input_ids = torch.index_select(self.inputs, 0, torch.tensor(comb)).cuda()
-            attention_masks = torch.index_select(self.masks, 0, torch.tensor(comb)).cuda()
-            h = self.bert(input_ids=input_ids, attention_mask=attention_masks)[0][:,0,:]
-            s = self.scoring(h)
-            output.append(s)
-        output = torch.cat(output)
-        return output
+    def forward(self, input_ids, attention_masks):
+        h = self.bert(input_ids=input_ids, attention_mask=attention_masks)[0][:,0,:]
+        s = self.scoring(h)
+        return s
         
 def save_model(model, name, output_path='../results/'):
     model_state_dict = model.state_dict()
@@ -153,26 +149,36 @@ def load_model(model, name, output_path='../results/'):
     checkpoint = torch.load(checkpoint_path)
     model.load_state_dict(checkpoint['model'])
     
+class MyDataset(Dataset):
+    def __init__(self, input_ids, attention_mask):
+        self.input_ids = input_ids
+        self.atten_masks = attention_mask
+    def __len__(self):
+        return len(self.input_ids)
+    def __getitem__(self,index):
+        return {"input_ids": self.input_ids[index],
+                "attention_masks": self.atten_masks[index]}
+    
 def batch_train(model, data_split, optimizer, batch_size, config):
     model.train()
-    pos_train = data_split['train_pos']
-    neg_train = data_split['train_neg']
+    pos_dataset = MyDataset(data_split['train_pos']['input_ids'], data_split['train_pos']['attention_masks'])
+    neg_dataset = MyDataset(data_split['train_neg']['input_ids'], data_split['train_neg']['attention_masks'])
     
     bceloss = nn.BCELoss(reduction='mean')
     total_loss, total_batch = 0, 0
-    pos_dataloader = DataLoader(pos_train, batch_size, shuffle=True, collate_fn=lambda x: x)
-    neg_dataloader = DataLoader(neg_train, 3*batch_size, shuffle=True, collate_fn=lambda x: x) # pos comb : neg comb = 1 : 3
+    pos_dataloader = DataLoader(pos_dataset, batch_size, shuffle=True)
+    neg_dataloader = DataLoader(neg_dataset, 3*batch_size, shuffle=True) # pos comb : neg comb = 1 : 3
     
     for i, (pos_batch, neg_batch) in enumerate(zip(pos_dataloader, neg_dataloader)):
         optimizer.zero_grad()
-        pos_out = model(pos_batch)
-        neg_out = model(neg_batch)
+        pos_out = model(pos_batch['input_ids'].cuda(), pos_batch['attention_masks'].cuda()).reshape(-1)
+        neg_out = model(neg_batch['input_ids'].cuda(), neg_batch['attention_masks'].cuda()).reshape(-1)
         pos_loss = bceloss(pos_out, torch.ones(pos_out.shape[0], dtype=torch.float).cuda())
         neg_loss = bceloss(neg_out, torch.zeros(neg_out.shape[0], dtype=torch.float).cuda())
         loss = pos_loss + neg_loss
         loss.backward()
         optimizer.step()
-        if i%(len(pos_dataloader)//50)==0:
+        if i%(len(pos_dataloader)//2)==0:
             print (f"[{i}/{len(pos_dataloader)}] Loss: {loss.item():.4f}")
             if config.wandb:
                 wandb.log({'loss': loss.item()})
@@ -193,10 +199,14 @@ def pred_F1(model, data_split, flag):
         pos_data = data_split['test_pos']
         neg_data = data_split['test_neg_f1']
     pos_out, neg_out = [], []
-    for comb in tqdm(pos_data):
-        pos_out.append(model([comb]).detach().cpu())
-    for comb in tqdm(neg_data):
-        neg_out.append(model([comb]).detach().cpu())
+    pos_dataset = MyDataset(pos_data['input_ids'], pos_data['attention_masks'])
+    neg_dataset = MyDataset(neg_data['input_ids'], neg_data['attention_masks'])
+    pos_dataloader = DataLoader(pos_dataset, 64, shuffle=True)
+    neg_dataloader = DataLoader(neg_dataset, 64, shuffle=True)
+    for batch in tqdm(pos_dataloader):
+        pos_out.append(model(batch['input_ids'].cuda(), batch['attention_masks'].cuda()).reshape(-1).detach().cpu())
+    for batch in tqdm(neg_dataloader):
+        neg_out.append(model(batch['input_ids'].cuda(), batch['attention_masks'].cuda()).reshape(-1).detach().cpu())
     pos_out, neg_out = torch.cat(pos_out), torch.cat(neg_out)
     return pos_out, neg_out
 
@@ -229,10 +239,15 @@ def test_Hit(model, data_split, flag, device):
         neg_data = data_split['test_neg_hit']
     
     pos_out, neg_out = [], []
-    for comb in tqdm(pos_data):
-        pos_out.append(model([comb]).detach().cpu())
-    for comb in tqdm(neg_data):
-        neg_out.append(model([comb]).detach().cpu())
+    pos_dataset = MyDataset(pos_data['input_ids'], pos_data['attention_masks'])
+    neg_dataset = MyDataset(neg_data['input_ids'], neg_data['attention_masks'])
+    pos_dataloader = DataLoader(pos_dataset, 64, shuffle=True)
+    neg_dataloader = DataLoader(neg_dataset, 64, shuffle=True)
+    for batch in tqdm(pos_dataloader):
+        pos_out.append(model(batch['input_ids'].cuda(), batch['attention_masks'].cuda()).reshape(-1).detach().cpu())
+    for batch in tqdm(neg_dataloader):
+        neg_out.append(model(batch['input_ids'].cuda(), batch['attention_masks'].cuda()).reshape(-1).detach().cpu())
+
     pos_out = torch.cat(pos_out)
     neg_out = torch.cat(neg_out).reshape(-1, 100)
     hits10, hits20, hits30 = mmr(pos_out, neg_out)
@@ -272,15 +287,14 @@ def main(config):
 
     # Dataset
     print(colored('Retrieve dataset', 'red'))
-    data_split = get_data_split(os.path.join("../Dataset/", config.dataset_type))
-    print (data_split.keys())    
-    concept_inputs, concept_masks = get_concept_embeddings(data_split['entities'])
-    print (concept_inputs.shape, concept_masks.shape)
+    entities, data_split = get_data_split(os.path.join("../Dataset/", config.dataset_type))
+    data_split = tokenization(entities, data_split)
+    print (data_split.keys())
     
     # Model
     print(colored('Retrieve model', 'red'))
-    model = Model(False, concept_inputs, concept_masks).to(device)
-    print (model)
+    model = Model(False).to(device)
+    # print (model)
     
     # Optimizer
     print (colored('Get optimizer', 'red'))
@@ -289,7 +303,7 @@ def main(config):
 
     # Train
     f1_log, hits_log = [], []
-    model_name = "_".join(["enb", config.dataset_type, str(config.learning_rate), str(config.seed)])
+    model_name = "_".join(["pro", config.dataset_type, str(config.learning_rate), str(config.seed)])
     print (model_name)
     best_f1, best_hit, patience = 0, 0, 0
     
@@ -297,17 +311,15 @@ def main(config):
         print ("Epoch: ", epoch)
         # train
         loss = batch_train(model, data_split, optimizer, config.batch_size, config)
-        print(f'Epoch: {epoch:02d}, avg_loss: {loss:.4f}')
+        print(f'Epoch: {epoch:02d}, Loss: {loss:.4f}')
 
         if config.wandb:
             wandb.log({'epochs': epoch, 'avg_loss': loss})
            
         # test F1
         if epoch >= 0 and (epoch-1) % 1 == 0:
-            #train_f1, train_prec, train_recall = test_F1(model, data_split, flag='train', device=device)
-            #valid_f1, valid_prec, valid_recall = test_F1(model, data_split, flag='valid', device=device)
             valid_pos_pred, valid_neg_pred = pred_F1(model, data_split, flag='valid')
-            test_pos_pred, test_neg_pred = pred_F1(model, data_split, flag='test') 
+            test_pos_pred, test_neg_pred = pred_F1(model, data_split, flag='test')
             threshold = get_threshold(valid_pos_pred, valid_neg_pred)
             valid_f1, valid_prec, valid_recall = F1_score(valid_pos_pred, valid_neg_pred, threshold)
             test_f1, test_prec, test_recall = F1_score(test_pos_pred, test_neg_pred, threshold)
@@ -384,4 +396,7 @@ if __name__ == "__main__":
     config = parser.parse_args()
 
     main(config)
+
+
+
 
