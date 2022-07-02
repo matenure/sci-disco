@@ -23,7 +23,7 @@ from torch.utils.data import DataLoader
 from transformers import BertModel, AdamW
 from sklearn.metrics import precision_recall_curve
 import time
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 # Set seed for reproducibility
 def set_seed(seed_value=42):
@@ -399,6 +399,8 @@ def main(config):
     print (f'Test_hit@10: {test_hit10}, Test_hit@20: {test_hit20}, Test_hit@30:{test_hit30}')
 
     if config.wandb:
+        wandb.log({"Final Test F1": test_f1, "Final Test Prec": test_prec, "Final Test Recall": test_recall})
+        wandb.log({"Final Test hits@10": test_hit10, "Final Test hits@20": test_hit20, "Final Test hits@30": test_hit30})
         wandb.finish()
 
 if __name__ == "__main__":

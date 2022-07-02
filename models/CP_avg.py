@@ -2,13 +2,12 @@
 Project: IBM Research: Scientific Discovery
 Author: Yuchen Zeng
 Combinatorial Prediction Method:
-CP-avg: use average function to combine feature
+CP-enb: use average as scoring function to combine feature
 '''
 
 import re
 import os
 import argparse
-import click
 import wandb
 import random 
 import numpy as np
@@ -23,7 +22,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from transformers import BertModel, AdamW
 from sklearn.metrics import precision_recall_curve
-
+import time
 os.environ["CUDA_VISIBLE_DEVICES"] = "2"
 
 # Set seed for reproducibility
@@ -103,25 +102,25 @@ class Model(nn.Module):
         self.bert = BertModel.from_pretrained('bert-base-uncased')
         self.inputs = inputs
         self.masks = masks
-        # mlps
+        # scoring parameters
         self.mlps = nn.Sequential(
-           nn.Linear(768, 128),
-           nn.ReLU(),
-           nn.Dropout(p=0.5),
-           nn.Linear(128, 1),
-           nn.Sigmoid()
-           )
+                nn.Linear(768, 128),
+                nn.ReLU(),
+                nn.Dropout(p=0.5),
+                nn.Linear(128, 1),
+                nn.Sigmoid()
+                )
 
         # Freeze the BERT model
         if freeze_bert:
             for param in self.bert.parameters():
                 param.requires_grad = False
-                
-    def scoring(self, x):
-        h = torch.mean(x, dim=0)
-        h = self.mlps(h)
+        
+    def new_scoring(self, x):
+        h = torch.mean(x, 1)
+        h = self.mlps(h).reshape(-1)
         return h
-    
+
     def forward(self, batch):
         input_ids2, input_ids3, attn_masks2, attn_masks3 = [], [], [], []
         ind2, ind3 = [], []
@@ -138,25 +137,14 @@ class Model(nn.Module):
         if len(input_ids2)!=0:
             input_ids2, attn_masks2 = torch.cat(input_ids2).cuda(), torch.cat(attn_masks2).cuda()
             h2 = self.bert(input_ids=input_ids2, attention_mask=attn_masks2)[0][:,0,:].reshape(-1, 2, 768)
-            output.append(self.scoring(h2))
+            output.append(self.new_scoring(h2))
         if len(input_ids3)!=0:
             input_ids3, attn_masks3 = torch.cat(input_ids3).cuda(), torch.cat(attn_masks3).cuda()
             h3 = self.bert(input_ids=input_ids3, attention_mask=attn_masks3)[0][:,0,:].reshape(-1, 3, 768)
-            output.append(self.scoring(h3))
+            output.append(self.new_scoring(h3))
         output = torch.cat(output)
         ind = torch.cat([torch.tensor(ind2, dtype=torch.int32), torch.tensor(ind3, dtype=torch.int32)]).cuda()
         output = torch.index_select(output, 0, torch.argsort(ind))
-        return output
-    
-    def forward(self, batch):
-        output = []
-        for comb in batch:
-            input_ids = torch.index_select(self.inputs, 0, torch.tensor(comb)).cuda()
-            attention_masks = torch.index_select(self.masks, 0, torch.tensor(comb)).cuda()
-            h = self.bert(input_ids=input_ids, attention_mask=attention_masks)[0][:,0,:]
-            s = self.scoring(h)
-            output.append(s)
-        output = torch.cat(output)
         return output
         
 def save_model(model, name, output_path='/shared/scratch/0/v_yuchen_zeng/sci_disco/saved_models/'):
@@ -216,7 +204,7 @@ def pred_F1(model, data_split, flag):
     elif flag == 'test':
         pos_data = data_split['test_pos']
         neg_data = data_split['test_neg_f1']
-    
+
     pos_dataloader = DataLoader(pos_data, 32, shuffle=False, collate_fn=lambda x: x)
     neg_dataloader = DataLoader(neg_data, 3*32, shuffle=False, collate_fn=lambda x: x)
     
@@ -255,7 +243,7 @@ def test_Hit(model, data_split, flag, device):
     elif flag == 'test':
         pos_data = data_split['test_pos']
         neg_data = data_split['test_neg_hit']
-    
+   
     pos_dataloader = DataLoader(pos_data, 2, shuffle=False, collate_fn=lambda x: x)
     neg_dataloader = DataLoader(neg_data, 100*2, shuffle=False, collate_fn=lambda x: x)
     pos_out, neg_out = [], []
@@ -326,15 +314,17 @@ def main(config):
         print ("Epoch: ", epoch)
         # train
         loss = batch_train(model, data_split, optimizer, config.batch_size, config)
-        print(f'Epoch: {epoch:02d}, Loss: {loss:.4f}')
+        print(f'Epoch: {epoch:02d}, avg_loss: {loss:.4f}')
 
         if config.wandb:
             wandb.log({'epochs': epoch, 'avg_loss': loss})
            
         # test F1
         if epoch >= 0 and (epoch-1) % 1 == 0:
+            #train_f1, train_prec, train_recall = test_F1(model, data_split, flag='train', device=device)
+            #valid_f1, valid_prec, valid_recall = test_F1(model, data_split, flag='valid', device=device)
             valid_pos_pred, valid_neg_pred = pred_F1(model, data_split, flag='valid')
-            test_pos_pred, test_neg_pred = pred_F1(model, data_split, flag='test')
+            test_pos_pred, test_neg_pred = pred_F1(model, data_split, flag='test') 
             threshold = get_threshold(valid_pos_pred, valid_neg_pred)
             valid_f1, valid_prec, valid_recall = F1_score(valid_pos_pred, valid_neg_pred, threshold)
             test_f1, test_prec, test_recall = F1_score(test_pos_pred, test_neg_pred, threshold)
@@ -393,6 +383,8 @@ def main(config):
     print (f'Test_hit@10: {test_hit10}, Test_hit@20: {test_hit20}, Test_hit@30:{test_hit30}')
 
     if config.wandb:
+        wandb.log({"Final Test F1": test_f1, "Final Test Prec": test_prec, "Final Test Recall": test_recall})
+        wandb.log({"Final Test hits@10": test_hit10, "Final Test hits@20": test_hit20, "Final Test hits@30": test_hit30})
         wandb.finish()
 
 if __name__ == "__main__":
@@ -401,16 +393,14 @@ if __name__ == "__main__":
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num_workers", type=int, default=0)
-    parser.add_argument("--batch_size", type=int, default=60)
+    parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--learning_rate", type=float, default=1e-5)
     parser.add_argument("--weight_decay", type=float, default=1e-6)
     parser.add_argument("--eval_steps", type=int, default=1)
-    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--patience", type=int, default=20)
     parser.add_argument("--wandb", type=int, default=0) # 0 for False
     config = parser.parse_args()
 
     main(config)
-
-
 
