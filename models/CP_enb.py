@@ -8,7 +8,6 @@ CP-enb: use energy based scoring function to combine feature
 import re
 import os
 import argparse
-import click
 import wandb
 import random 
 import numpy as np
@@ -23,8 +22,8 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from transformers import BertModel, AdamW
 from sklearn.metrics import precision_recall_curve
-
-os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+import time
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 # Set seed for reproducibility
 def set_seed(seed_value=42):
@@ -114,28 +113,57 @@ class Model(nn.Module):
         if freeze_bert:
             for param in self.bert.parameters():
                 param.requires_grad = False
-                
-    def scoring(self, x):
+        
+    def old_scoring(self, x):
         # x is the combination of concept features
         # \mean_i (A_i)*b
         first_term_value = torch.mean(torch.stack([i @ self.b for i in x]))
         # \mean_ij A_i.T * W_ij * A_j
+        # pairwise_comb = torch.combinations(torch.arange(0,len(x),dtype=torch.long).cuda())
+        # second_term_value = torch.mean(torch.stack([x[i] @ self.W @ x[j] for i,j in pairwise_comb]))
         pairwise_comb = torch.combinations(torch.arange(0,len(x),dtype=torch.long).cuda())
-        second_term_value = torch.mean(torch.stack([x[i] @ self.W @ x[j] for i,j in pairwise_comb]))
+        second_term_value = []
+        for i,j in pairwise_comb:
+            second_term_value.append(x[i] @ self.W @ x[j])
+            second_term_value.append(x[j] @ self.W @ x[i])
+        second_term_value = torch.mean(torch.stack(second_term_value))
         return torch.sigmoid(first_term_value + second_term_value + self.c)
-    
+
+    def new_scoring(self, x, comb_num):
+        first_term_value = torch.mean(torch.matmul(x, self.b), 1).reshape(-1)
+        mask = 1 - torch.eye(comb_num)
+        masks = mask.repeat(len(x), 1).reshape(len(x), comb_num, comb_num).cuda()
+        matrix = torch.bmm(torch.matmul(x, self.W), torch.transpose(x, 1,2)) * masks
+        second_term_value = torch.sum(matrix, (1,2)) / torch.sum(masks, (1,2))
+        return torch.sigmoid(torch.add(first_term_value + second_term_value, self.c))
+
     def forward(self, batch):
-        output = []
-        for comb in batch:
-            input_ids = torch.index_select(self.inputs, 0, torch.tensor(comb)).cuda()
-            attention_masks = torch.index_select(self.masks, 0, torch.tensor(comb)).cuda()
-            h = self.bert(input_ids=input_ids, attention_mask=attention_masks)[0][:,0,:]
-            s = self.scoring(h)
-            output.append(s)
+        input_ids2, input_ids3, attn_masks2, attn_masks3 = [], [], [], []
+        ind2, ind3 = [], []
+        for i, comb in enumerate(batch):
+            if len(comb)==2:
+                ind2.append(int(i))
+                input_ids2.append(torch.index_select(self.inputs, 0, torch.tensor(comb)))
+                attn_masks2.append(torch.index_select(self.masks, 0, torch.tensor(comb)))
+            else:
+                ind3.append(int(i))
+                input_ids3.append(torch.index_select(self.inputs, 0, torch.tensor(comb)))
+                attn_masks3.append(torch.index_select(self.masks, 0, torch.tensor(comb)))
+        h2, h3, output = [], [], []
+        if len(input_ids2)!=0:
+            input_ids2, attn_masks2 = torch.cat(input_ids2).cuda(), torch.cat(attn_masks2).cuda()
+            h2 = self.bert(input_ids=input_ids2, attention_mask=attn_masks2)[0][:,0,:].reshape(-1, 2, 768)
+            output.append(self.new_scoring(h2, 2))
+        if len(input_ids3)!=0:
+            input_ids3, attn_masks3 = torch.cat(input_ids3).cuda(), torch.cat(attn_masks3).cuda()
+            h3 = self.bert(input_ids=input_ids3, attention_mask=attn_masks3)[0][:,0,:].reshape(-1, 3, 768)
+            output.append(self.new_scoring(h3, 3))
         output = torch.cat(output)
+        ind = torch.cat([torch.tensor(ind2, dtype=torch.int32), torch.tensor(ind3, dtype=torch.int32)]).cuda()
+        output = torch.index_select(output, 0, torch.argsort(ind))
         return output
         
-def save_model(model, name, output_path='../results/'):
+def save_model(model, name, output_path='/shared/scratch/0/v_yuchen_zeng/sci_disco/saved_models/'):
     model_state_dict = model.state_dict()
     checkpoint = {
         'model': model_state_dict,
@@ -145,7 +173,7 @@ def save_model(model, name, output_path='../results/'):
     checkpoint_path = os.path.join(output_path, name+'.pt')
     torch.save(checkpoint, checkpoint_path)
 
-def load_model(model, name, output_path='../results/'):
+def load_model(model, name, output_path='/shared/scratch/0/v_yuchen_zeng/sci_disco/saved_models'):
     checkpoint_path = os.path.join(output_path, name+'.pt')
     if not os.path.exists(checkpoint_path):
         print (f"Model {checkpoint_path} does not exist.")
@@ -172,7 +200,7 @@ def batch_train(model, data_split, optimizer, batch_size, config):
         loss = pos_loss + neg_loss
         loss.backward()
         optimizer.step()
-        if i%(len(pos_dataloader)//50)==0:
+        if i%(len(pos_dataloader)//20)==0:
             print (f"[{i}/{len(pos_dataloader)}] Loss: {loss.item():.4f}")
             if config.wandb:
                 wandb.log({'loss': loss.item()})
@@ -192,12 +220,16 @@ def pred_F1(model, data_split, flag):
     elif flag == 'test':
         pos_data = data_split['test_pos']
         neg_data = data_split['test_neg_f1']
+
+    pos_dataloader = DataLoader(pos_data, 32, shuffle=False, collate_fn=lambda x: x)
+    neg_dataloader = DataLoader(neg_data, 3*32, shuffle=False, collate_fn=lambda x: x)
+    
     pos_out, neg_out = [], []
-    for comb in tqdm(pos_data):
-        pos_out.append(model([comb]).detach().cpu())
-    for comb in tqdm(neg_data):
-        neg_out.append(model([comb]).detach().cpu())
-    pos_out, neg_out = torch.cat(pos_out), torch.cat(neg_out)
+    for pos_batch, neg_batch in tqdm(zip(pos_dataloader, neg_dataloader), total=len(pos_dataloader)):
+        pos_out.append(model(pos_batch).detach().cpu())
+        neg_out.append(model(neg_batch).detach().cpu())
+    pos_out = torch.cat(pos_out)
+    neg_out = torch.cat(neg_out)
     return pos_out, neg_out
 
 def get_threshold(pos_pred, neg_pred):
@@ -227,12 +259,13 @@ def test_Hit(model, data_split, flag, device):
     elif flag == 'test':
         pos_data = data_split['test_pos']
         neg_data = data_split['test_neg_hit']
-    
+   
+    pos_dataloader = DataLoader(pos_data, 2, shuffle=False, collate_fn=lambda x: x)
+    neg_dataloader = DataLoader(neg_data, 100*2, shuffle=False, collate_fn=lambda x: x)
     pos_out, neg_out = [], []
-    for comb in tqdm(pos_data):
-        pos_out.append(model([comb]).detach().cpu())
-    for comb in tqdm(neg_data):
-        neg_out.append(model([comb]).detach().cpu())
+    for pos_batch, neg_batch in tqdm(zip(pos_dataloader, neg_dataloader), total=len(pos_dataloader)):
+        pos_out.append(model(pos_batch).detach().cpu())
+        neg_out.append(model(neg_batch).detach().cpu())
     pos_out = torch.cat(pos_out)
     neg_out = torch.cat(neg_out).reshape(-1, 100)
     hits10, hits20, hits30 = mmr(pos_out, neg_out)
@@ -272,7 +305,7 @@ def main(config):
 
     # Dataset
     print(colored('Retrieve dataset', 'red'))
-    data_split = get_data_split(os.path.join("../Dataset/", config.dataset_type))
+    data_split = get_data_split(os.path.join("/shared/scratch/0/v_yuchen_zeng/sci_disco/Dataset/", config.dataset_type))
     print (data_split.keys())    
     concept_inputs, concept_masks = get_concept_embeddings(data_split['entities'])
     print (concept_inputs.shape, concept_masks.shape)
@@ -378,8 +411,8 @@ if __name__ == "__main__":
     parser.add_argument("--learning_rate", type=float, default=1e-5)
     parser.add_argument("--weight_decay", type=float, default=1e-6)
     parser.add_argument("--eval_steps", type=int, default=1)
-    parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--patience", type=int, default=10)
+    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--patience", type=int, default=20)
     parser.add_argument("--wandb", type=int, default=0) # 0 for False
     config = parser.parse_args()
 
