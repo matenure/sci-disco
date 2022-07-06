@@ -8,7 +8,6 @@ CP-pro: use prompt-based learning to combine feature
 import re
 import os
 import argparse
-import click
 import wandb
 import random 
 import numpy as np
@@ -24,7 +23,7 @@ from torch.utils.data import DataLoader,Dataset
 from transformers import BertModel, AdamW
 from sklearn.metrics import precision_recall_curve
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "3"
+os.environ["CUDA_VISIBLE_DEVICES"] = "6"
 
 # Set seed for reproducibility
 def set_seed(seed_value=42):
@@ -131,7 +130,7 @@ class Model(nn.Module):
         s = self.scoring(h)
         return s
         
-def save_model(model, name, output_path='../results/'):
+def save_model(model, name, output_path='/shared/scratch/0/v_yuchen_zeng/sci_disco/saved_models/'):
     model_state_dict = model.state_dict()
     checkpoint = {
         'model': model_state_dict,
@@ -141,7 +140,7 @@ def save_model(model, name, output_path='../results/'):
     checkpoint_path = os.path.join(output_path, name+'.pt')
     torch.save(checkpoint, checkpoint_path)
 
-def load_model(model, name, output_path='../results/'):
+def load_model(model, name, output_path='/shared/scratch/0/v_yuchen_zeng/sci_disco/saved_models'):
     checkpoint_path = os.path.join(output_path, name+'.pt')
     if not os.path.exists(checkpoint_path):
         print (f"Model {checkpoint_path} does not exist.")
@@ -175,10 +174,10 @@ def batch_train(model, data_split, optimizer, batch_size, config):
         neg_out = model(neg_batch['input_ids'].cuda(), neg_batch['attention_masks'].cuda()).reshape(-1)
         pos_loss = bceloss(pos_out, torch.ones(pos_out.shape[0], dtype=torch.float).cuda())
         neg_loss = bceloss(neg_out, torch.zeros(neg_out.shape[0], dtype=torch.float).cuda())
-        loss = pos_loss + neg_loss
+        loss = 3*pos_loss + neg_loss
         loss.backward()
         optimizer.step()
-        if i%(len(pos_dataloader)//2)==0:
+        if i%(len(pos_dataloader)//20)==0:
             print (f"[{i}/{len(pos_dataloader)}] Loss: {loss.item():.4f}")
             if config.wandb:
                 wandb.log({'loss': loss.item()})
@@ -287,7 +286,7 @@ def main(config):
 
     # Dataset
     print(colored('Retrieve dataset', 'red'))
-    entities, data_split = get_data_split(os.path.join("../Dataset/", config.dataset_type))
+    entities, data_split = get_data_split(os.path.join("/shared/scratch/0/v_yuchen_zeng/sci_disco/Dataset/", config.dataset_type))
     data_split = tokenization(entities, data_split)
     print (data_split.keys())
     
@@ -321,8 +320,8 @@ def main(config):
             valid_pos_pred, valid_neg_pred = pred_F1(model, data_split, flag='valid')
             test_pos_pred, test_neg_pred = pred_F1(model, data_split, flag='test')
             threshold = get_threshold(valid_pos_pred, valid_neg_pred)
-            valid_f1, valid_prec, valid_recall = F1_score(valid_pos_pred, valid_neg_pred, threshold)
-            test_f1, test_prec, test_recall = F1_score(test_pos_pred, test_neg_pred, threshold)
+            valid_f1, valid_prec, valid_recall = F1_score(valid_pos_pred, valid_neg_pred, 0.5)
+            test_f1, test_prec, test_recall = F1_score(test_pos_pred, test_neg_pred, 0.5)
 
             print(f'Epoch: {epoch:02d}',
                     f',\nThreshold: {threshold:.4f}'
@@ -378,11 +377,13 @@ def main(config):
     print (f'Test_hit@10: {test_hit10}, Test_hit@20: {test_hit20}, Test_hit@30:{test_hit30}')
 
     if config.wandb:
+        wandb.log({"Final Test F1": test_f1, "Final Test Prec": test_prec, "Final Test Recall": test_recall})
+        wandb.log({"Final Test hits@10": test_hit10, "Final Test hits@20": test_hit20, "Final Test hits@30": test_hit30})
         wandb.finish()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="sci_disco_EMNLP2022")
-    parser.add_argument("--dataset_type", type=str, default="NLP_0.1")
+    parser.add_argument("--dataset_type", type=str, default="CV_0.5")
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num_workers", type=int, default=0)
@@ -390,8 +391,8 @@ if __name__ == "__main__":
     parser.add_argument("--learning_rate", type=float, default=1e-5)
     parser.add_argument("--weight_decay", type=float, default=1e-6)
     parser.add_argument("--eval_steps", type=int, default=1)
-    parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--patience", type=int, default=10)
+    parser.add_argument("--epochs", type=int, default=20)
+    parser.add_argument("--patience", type=int, default=20)
     parser.add_argument("--wandb", type=int, default=0) # 0 for False
     config = parser.parse_args()
 

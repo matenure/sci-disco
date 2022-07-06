@@ -2,13 +2,12 @@
 Project: IBM Research: Scientific Discovery
 Author: Yuchen Zeng
 Combinatorial Prediction Method:
-CP-avg: use average function to combine feature
+CP-enb: use average as scoring function to combine feature
 '''
 
 import re
 import os
 import argparse
-import click
 import wandb
 import random 
 import numpy as np
@@ -23,8 +22,8 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 from transformers import BertModel, AdamW
 from sklearn.metrics import precision_recall_curve
-
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+import time
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 # Set seed for reproducibility
 def set_seed(seed_value=42):
@@ -103,37 +102,52 @@ class Model(nn.Module):
         self.bert = BertModel.from_pretrained('bert-base-uncased')
         self.inputs = inputs
         self.masks = masks
-        # mlps
+        # scoring parameters
         self.mlps = nn.Sequential(
-           nn.Linear(768, 128),
-           nn.ReLU(),
-           nn.Dropout(p=0.5),
-           nn.Linear(128, 1),
-           nn.Sigmoid()
-           )
+                nn.Linear(768, 128),
+                nn.ReLU(),
+                nn.Dropout(p=0.5),
+                nn.Linear(128, 1),
+                nn.Sigmoid()
+                )
 
         # Freeze the BERT model
         if freeze_bert:
             for param in self.bert.parameters():
                 param.requires_grad = False
-                
-    def scoring(self, x):
-        h = torch.mean(x, dim=0)
-        h = self.mlps(h)
+        
+    def new_scoring(self, x):
+        h = torch.mean(x, 1)
+        h = self.mlps(h).reshape(-1)
         return h
-    
+
     def forward(self, batch):
-        output = []
-        for comb in batch:
-            input_ids = torch.index_select(self.inputs, 0, torch.tensor(comb)).cuda()
-            attention_masks = torch.index_select(self.masks, 0, torch.tensor(comb)).cuda()
-            h = self.bert(input_ids=input_ids, attention_mask=attention_masks)[0][:,0,:]
-            s = self.scoring(h)
-            output.append(s)
+        input_ids2, input_ids3, attn_masks2, attn_masks3 = [], [], [], []
+        ind2, ind3 = [], []
+        for i, comb in enumerate(batch):
+            if len(comb)==2:
+                ind2.append(int(i))
+                input_ids2.append(torch.index_select(self.inputs, 0, torch.tensor(comb)))
+                attn_masks2.append(torch.index_select(self.masks, 0, torch.tensor(comb)))
+            else:
+                ind3.append(int(i))
+                input_ids3.append(torch.index_select(self.inputs, 0, torch.tensor(comb)))
+                attn_masks3.append(torch.index_select(self.masks, 0, torch.tensor(comb)))
+        h2, h3, output = [], [], []
+        if len(input_ids2)!=0:
+            input_ids2, attn_masks2 = torch.cat(input_ids2).cuda(), torch.cat(attn_masks2).cuda()
+            h2 = self.bert(input_ids=input_ids2, attention_mask=attn_masks2)[0][:,0,:].reshape(-1, 2, 768)
+            output.append(self.new_scoring(h2))
+        if len(input_ids3)!=0:
+            input_ids3, attn_masks3 = torch.cat(input_ids3).cuda(), torch.cat(attn_masks3).cuda()
+            h3 = self.bert(input_ids=input_ids3, attention_mask=attn_masks3)[0][:,0,:].reshape(-1, 3, 768)
+            output.append(self.new_scoring(h3))
         output = torch.cat(output)
+        ind = torch.cat([torch.tensor(ind2, dtype=torch.int32), torch.tensor(ind3, dtype=torch.int32)]).cuda()
+        output = torch.index_select(output, 0, torch.argsort(ind))
         return output
         
-def save_model(model, name, output_path='../results/'):
+def save_model(model, name, output_path='/shared/scratch/0/v_yuchen_zeng/sci_disco/saved_models/'):
     model_state_dict = model.state_dict()
     checkpoint = {
         'model': model_state_dict,
@@ -143,7 +157,7 @@ def save_model(model, name, output_path='../results/'):
     checkpoint_path = os.path.join(output_path, name+'.pt')
     torch.save(checkpoint, checkpoint_path)
 
-def load_model(model, name, output_path='../results/'):
+def load_model(model, name, output_path='/shared/scratch/0/v_yuchen_zeng/sci_disco/saved_models'):
     checkpoint_path = os.path.join(output_path, name+'.pt')
     if not os.path.exists(checkpoint_path):
         print (f"Model {checkpoint_path} does not exist.")
@@ -167,10 +181,10 @@ def batch_train(model, data_split, optimizer, batch_size, config):
         neg_out = model(neg_batch)
         pos_loss = bceloss(pos_out, torch.ones(pos_out.shape[0], dtype=torch.float).cuda())
         neg_loss = bceloss(neg_out, torch.zeros(neg_out.shape[0], dtype=torch.float).cuda())
-        loss = pos_loss + neg_loss
+        loss = 3*pos_loss + neg_loss
         loss.backward()
         optimizer.step()
-        if i%(len(pos_dataloader)//50)==0:
+        if i%(len(pos_dataloader)//20)==0:
             print (f"[{i}/{len(pos_dataloader)}] Loss: {loss.item():.4f}")
             if config.wandb:
                 wandb.log({'loss': loss.item()})
@@ -190,12 +204,16 @@ def pred_F1(model, data_split, flag):
     elif flag == 'test':
         pos_data = data_split['test_pos']
         neg_data = data_split['test_neg_f1']
+
+    pos_dataloader = DataLoader(pos_data, 32, shuffle=False, collate_fn=lambda x: x)
+    neg_dataloader = DataLoader(neg_data, 3*32, shuffle=False, collate_fn=lambda x: x)
+    
     pos_out, neg_out = [], []
-    for comb in tqdm(pos_data):
-        pos_out.append(model([comb]).detach().cpu())
-    for comb in tqdm(neg_data):
-        neg_out.append(model([comb]).detach().cpu())
-    pos_out, neg_out = torch.cat(pos_out), torch.cat(neg_out)
+    for pos_batch, neg_batch in tqdm(zip(pos_dataloader, neg_dataloader), total=len(pos_dataloader)):
+        pos_out.append(model(pos_batch).detach().cpu())
+        neg_out.append(model(neg_batch).detach().cpu())
+    pos_out = torch.cat(pos_out)
+    neg_out = torch.cat(neg_out)
     return pos_out, neg_out
 
 def get_threshold(pos_pred, neg_pred):
@@ -225,12 +243,13 @@ def test_Hit(model, data_split, flag, device):
     elif flag == 'test':
         pos_data = data_split['test_pos']
         neg_data = data_split['test_neg_hit']
-    
+   
+    pos_dataloader = DataLoader(pos_data, 2, shuffle=False, collate_fn=lambda x: x)
+    neg_dataloader = DataLoader(neg_data, 100*2, shuffle=False, collate_fn=lambda x: x)
     pos_out, neg_out = [], []
-    for comb in tqdm(pos_data):
-        pos_out.append(model([comb]).detach().cpu())
-    for comb in tqdm(neg_data):
-        neg_out.append(model([comb]).detach().cpu())
+    for pos_batch, neg_batch in tqdm(zip(pos_dataloader, neg_dataloader), total=len(pos_dataloader)):
+        pos_out.append(model(pos_batch).detach().cpu())
+        neg_out.append(model(neg_batch).detach().cpu())
     pos_out = torch.cat(pos_out)
     neg_out = torch.cat(neg_out).reshape(-1, 100)
     hits10, hits20, hits30 = mmr(pos_out, neg_out)
@@ -270,7 +289,7 @@ def main(config):
 
     # Dataset
     print(colored('Retrieve dataset', 'red'))
-    data_split = get_data_split(os.path.join("../Dataset/", config.dataset_type))
+    data_split = get_data_split(os.path.join("/shared/scratch/0/v_yuchen_zeng/sci_disco/Dataset/", config.dataset_type))
     print (data_split.keys())    
     concept_inputs, concept_masks = get_concept_embeddings(data_split['entities'])
     print (concept_inputs.shape, concept_masks.shape)
@@ -295,18 +314,20 @@ def main(config):
         print ("Epoch: ", epoch)
         # train
         loss = batch_train(model, data_split, optimizer, config.batch_size, config)
-        print(f'Epoch: {epoch:02d}, Loss: {loss:.4f}')
+        print(f'Epoch: {epoch:02d}, avg_loss: {loss:.4f}')
 
         if config.wandb:
             wandb.log({'epochs': epoch, 'avg_loss': loss})
            
         # test F1
         if epoch >= 0 and (epoch-1) % 1 == 0:
+            #train_f1, train_prec, train_recall = test_F1(model, data_split, flag='train', device=device)
+            #valid_f1, valid_prec, valid_recall = test_F1(model, data_split, flag='valid', device=device)
             valid_pos_pred, valid_neg_pred = pred_F1(model, data_split, flag='valid')
-            test_pos_pred, test_neg_pred = pred_F1(model, data_split, flag='test')
+            test_pos_pred, test_neg_pred = pred_F1(model, data_split, flag='test') 
             threshold = get_threshold(valid_pos_pred, valid_neg_pred)
-            valid_f1, valid_prec, valid_recall = F1_score(valid_pos_pred, valid_neg_pred, threshold)
-            test_f1, test_prec, test_recall = F1_score(test_pos_pred, test_neg_pred, threshold)
+            valid_f1, valid_prec, valid_recall = F1_score(valid_pos_pred, valid_neg_pred, 0.5)
+            test_f1, test_prec, test_recall = F1_score(test_pos_pred, test_neg_pred, 0.5)
 
             print(f'Epoch: {epoch:02d}',
                     f',\nThreshold: {threshold:.4f}'
@@ -362,11 +383,13 @@ def main(config):
     print (f'Test_hit@10: {test_hit10}, Test_hit@20: {test_hit20}, Test_hit@30:{test_hit30}')
 
     if config.wandb:
+        wandb.log({"Final Test F1": test_f1, "Final Test Prec": test_prec, "Final Test Recall": test_recall})
+        wandb.log({"Final Test hits@10": test_hit10, "Final Test hits@20": test_hit20, "Final Test hits@30": test_hit30})
         wandb.finish()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="sci_disco_EMNLP2022")
-    parser.add_argument("--dataset_type", type=str, default="NLP_0.1")
+    parser.add_argument("--dataset_type", type=str, default="NLP_0.5")
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num_workers", type=int, default=0)
@@ -374,12 +397,10 @@ if __name__ == "__main__":
     parser.add_argument("--learning_rate", type=float, default=1e-5)
     parser.add_argument("--weight_decay", type=float, default=1e-6)
     parser.add_argument("--eval_steps", type=int, default=1)
-    parser.add_argument("--epochs", type=int, default=10)
-    parser.add_argument("--patience", type=int, default=10)
+    parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--patience", type=int, default=20)
     parser.add_argument("--wandb", type=int, default=0) # 0 for False
     config = parser.parse_args()
 
     main(config)
-
-
 
