@@ -23,7 +23,7 @@ from torch.utils.data import DataLoader,Dataset
 from transformers import BertModel, AdamW
 from sklearn.metrics import precision_recall_curve
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "6"
 
 # Set seed for reproducibility
 def set_seed(seed_value=42):
@@ -130,7 +130,7 @@ class Model(nn.Module):
         s = self.scoring(h)
         return s
         
-def save_model(model, name, output_path='/shared/scratch/0/v_yuchen_zeng/sci_disco/models/'):
+def save_model(model, name, output_path='/shared/scratch/0/v_yuchen_zeng/sci_disco/saved_models/'):
     model_state_dict = model.state_dict()
     checkpoint = {
         'model': model_state_dict,
@@ -140,7 +140,7 @@ def save_model(model, name, output_path='/shared/scratch/0/v_yuchen_zeng/sci_dis
     checkpoint_path = os.path.join(output_path, name+'.pt')
     torch.save(checkpoint, checkpoint_path)
 
-def load_model(model, name, output_path='/shared/scratch/0/v_yuchen_zeng/sci_disco/models'):
+def load_model(model, name, output_path='/shared/scratch/0/v_yuchen_zeng/sci_disco/saved_models'):
     checkpoint_path = os.path.join(output_path, name+'.pt')
     if not os.path.exists(checkpoint_path):
         print (f"Model {checkpoint_path} does not exist.")
@@ -174,7 +174,7 @@ def batch_train(model, data_split, optimizer, batch_size, config):
         neg_out = model(neg_batch['input_ids'].cuda(), neg_batch['attention_masks'].cuda()).reshape(-1)
         pos_loss = bceloss(pos_out, torch.ones(pos_out.shape[0], dtype=torch.float).cuda())
         neg_loss = bceloss(neg_out, torch.zeros(neg_out.shape[0], dtype=torch.float).cuda())
-        loss = pos_loss + neg_loss
+        loss = 3*pos_loss + neg_loss
         loss.backward()
         optimizer.step()
         if i%(len(pos_dataloader)//20)==0:
@@ -320,8 +320,8 @@ def main(config):
             valid_pos_pred, valid_neg_pred = pred_F1(model, data_split, flag='valid')
             test_pos_pred, test_neg_pred = pred_F1(model, data_split, flag='test')
             threshold = get_threshold(valid_pos_pred, valid_neg_pred)
-            valid_f1, valid_prec, valid_recall = F1_score(valid_pos_pred, valid_neg_pred, threshold)
-            test_f1, test_prec, test_recall = F1_score(test_pos_pred, test_neg_pred, threshold)
+            valid_f1, valid_prec, valid_recall = F1_score(valid_pos_pred, valid_neg_pred, 0.5)
+            test_f1, test_prec, test_recall = F1_score(test_pos_pred, test_neg_pred, 0.5)
 
             print(f'Epoch: {epoch:02d}',
                     f',\nThreshold: {threshold:.4f}'

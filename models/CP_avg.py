@@ -23,7 +23,7 @@ from torch.utils.data import DataLoader
 from transformers import BertModel, AdamW
 from sklearn.metrics import precision_recall_curve
 import time
-os.environ["CUDA_VISIBLE_DEVICES"] = "2"
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 # Set seed for reproducibility
 def set_seed(seed_value=42):
@@ -181,7 +181,7 @@ def batch_train(model, data_split, optimizer, batch_size, config):
         neg_out = model(neg_batch)
         pos_loss = bceloss(pos_out, torch.ones(pos_out.shape[0], dtype=torch.float).cuda())
         neg_loss = bceloss(neg_out, torch.zeros(neg_out.shape[0], dtype=torch.float).cuda())
-        loss = pos_loss + neg_loss
+        loss = 3*pos_loss + neg_loss
         loss.backward()
         optimizer.step()
         if i%(len(pos_dataloader)//20)==0:
@@ -326,8 +326,8 @@ def main(config):
             valid_pos_pred, valid_neg_pred = pred_F1(model, data_split, flag='valid')
             test_pos_pred, test_neg_pred = pred_F1(model, data_split, flag='test') 
             threshold = get_threshold(valid_pos_pred, valid_neg_pred)
-            valid_f1, valid_prec, valid_recall = F1_score(valid_pos_pred, valid_neg_pred, threshold)
-            test_f1, test_prec, test_recall = F1_score(test_pos_pred, test_neg_pred, threshold)
+            valid_f1, valid_prec, valid_recall = F1_score(valid_pos_pred, valid_neg_pred, 0.5)
+            test_f1, test_prec, test_recall = F1_score(test_pos_pred, test_neg_pred, 0.5)
 
             print(f'Epoch: {epoch:02d}',
                     f',\nThreshold: {threshold:.4f}'
@@ -389,7 +389,7 @@ def main(config):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="sci_disco_EMNLP2022")
-    parser.add_argument("--dataset_type", type=str, default="NLP_0.1")
+    parser.add_argument("--dataset_type", type=str, default="NLP_0.5")
     parser.add_argument("--device", type=int, default=0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--num_workers", type=int, default=0)
