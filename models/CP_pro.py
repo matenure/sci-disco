@@ -23,7 +23,7 @@ from torch.utils.data import DataLoader,Dataset
 from transformers import BertModel, AdamW
 from sklearn.metrics import precision_recall_curve
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "6"
+os.environ["CUDA_VISIBLE_DEVICES"] = "7"
 
 # Set seed for reproducibility
 def set_seed(seed_value=42):

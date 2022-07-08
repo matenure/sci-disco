@@ -141,7 +141,7 @@ class Model(nn.Module):
             output.append(self.scoring(h3, 3))
         output = torch.cat(output)
         ind = torch.cat([torch.tensor(ind2, dtype=torch.int32), torch.tensor(ind3, dtype=torch.int32)]).cuda()
-        output = torch.index_select(output, 0, torch.argsort(ind))
+        output = torch.index_select(output, 0, torch.argsort(ind)) # maintain the input order
         return output
         
 def save_model(model, name, output_path='/shared/scratch/0/v_yuchen_zeng/sci_disco/models/'):
